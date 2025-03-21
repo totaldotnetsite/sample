@@ -1,9 +1,6 @@
-import requests
-import json
-import git
-import spacy
 import numpy as np
 import pandas as pd
+import spacy
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
@@ -14,21 +11,43 @@ from sentence_transformers import SentenceTransformer
 nlp = spacy.load("en_core_web_sm")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")  # BERT-based embedding
 
-# Jira API Details
-JIRA_URL = "https://your-jira-instance.atlassian.net/rest/api/2"
-HEADERS = {"Authorization": "Bearer YOUR_TOKEN", "Content-Type": "application/json"}
+# Sample Jira Defects (Simulated)
+defects = [
+    {
+        "key": "DEF-001",
+        "description": "Application crashes when submitting the payment form",
+        "created": "2025-03-15T10:00:00.000Z",
+        "affectedFiles": ["payment.py", "checkout.js"]
+    },
+    {
+        "key": "DEF-002",
+        "description": "User session timeout issue after login",
+        "created": "2025-03-17T12:00:00.000Z",
+        "affectedFiles": ["auth.py", "session_handler.js"]
+    }
+]
 
-# Function to fetch Jira Defects
-def get_jira_defects():
-    query = f"{JIRA_URL}/search?jql=project=DEFECTS AND status='Open'"
-    response = requests.get(query, headers=HEADERS)
-    return response.json()["issues"]
-
-# Function to fetch Jira Stories
-def get_jira_stories():
-    query = f"{JIRA_URL}/search?jql=project=STORY AND status='Done'"
-    response = requests.get(query, headers=HEADERS)
-    return response.json()["issues"]
+# Sample Jira Stories (Simulated)
+stories = [
+    {
+        "key": "STORY-101",
+        "description": "Implemented new payment API integration",
+        "created": "2025-03-14T09:00:00.000Z",
+        "modifiedFiles": ["payment.py", "billing.js"]
+    },
+    {
+        "key": "STORY-102",
+        "description": "Fixed session timeout issue for active users",
+        "created": "2025-03-16T15:30:00.000Z",
+        "modifiedFiles": ["auth.py", "session_handler.js"]
+    },
+    {
+        "key": "STORY-103",
+        "description": "Refactored cart checkout process",
+        "created": "2025-03-10T14:00:00.000Z",
+        "modifiedFiles": ["checkout.js", "cart_handler.js"]
+    }
+]
 
 # Function to calculate time difference (feature)
 def calculate_time_diff(defect_time, story_time):
@@ -45,15 +64,21 @@ def calculate_nlp_similarity(text1, text2):
 def analyze_git_changes(defect_files, story_files):
     return len(set(defect_files) & set(story_files))  # Count of overlapping modified files
 
-# Load historical data for training
-def load_training_data():
-    return pd.read_csv("historical_defect_story_mappings.csv")  # Must have labels
+# Sample Training Data (Simulated Historical Mappings)
+training_data = [
+    {"time_diff": 86400, "nlp_similarity": 0.85, "code_overlap": 2, "is_related": 1},  # Related
+    {"time_diff": 259200, "nlp_similarity": 0.65, "code_overlap": 1, "is_related": 0},  # Not Related
+    {"time_diff": 43200, "nlp_similarity": 0.92, "code_overlap": 2, "is_related": 1},  # Related
+    {"time_diff": 604800, "nlp_similarity": 0.50, "code_overlap": 0, "is_related": 0},  # Not Related
+]
+
+# Convert training data to Pandas DataFrame
+df = pd.DataFrame(training_data)
 
 # Train ML model
 def train_model():
-    df = load_training_data()
     X = df[["time_diff", "nlp_similarity", "code_overlap"]]
-    y = df["is_related"]  # 1 if related, 0 if not
+    y = df["is_related"]
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     model = RandomForestClassifier(n_estimators=100, random_state=42)
@@ -67,17 +92,17 @@ def train_model():
 # Function to predict related Jira Stories for a defect
 def predict_related_stories(defect, stories, model):
     defect_id = defect["key"]
-    defect_desc = defect["fields"]["description"]
-    defect_time = defect["fields"]["created"]
-    defect_files = defect.get("fields", {}).get("affectedFiles", [])
+    defect_desc = defect["description"]
+    defect_time = defect["created"]
+    defect_files = defect["affectedFiles"]
 
     probable_causes = []
 
     for story in stories:
         story_id = story["key"]
-        story_desc = story["fields"]["description"]
-        story_time = story["fields"]["created"]
-        story_files = story.get("fields", {}).get("modifiedFiles", [])
+        story_desc = story["description"]
+        story_time = story["created"]
+        story_files = story["modifiedFiles"]
 
         features = np.array([
             calculate_time_diff(defect_time, story_time),
@@ -89,15 +114,12 @@ def predict_related_stories(defect, stories, model):
         probability = model.predict_proba(features)[0][1]  # Probability of being related
         
         if prediction == 1:
-            probable_causes.append({"story_id": story_id, "probability": probability})
+            probable_causes.append({"story_id": story_id, "probability": round(probability, 2)})
 
     return {"defect_id": defect_id, "probable_causes": sorted(probable_causes, key=lambda x: -x["probability"])}
 
 # Run the prediction process
 if __name__ == "__main__":
     ml_model = train_model()
-    defects = get_jira_defects()
-    stories = get_jira_stories()
-
     results = [predict_related_stories(defect, stories, ml_model) for defect in defects]
     print(json.dumps(results, indent=4))
