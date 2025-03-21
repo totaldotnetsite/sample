@@ -1,35 +1,103 @@
-When identifying high-performing students for internships, consider the following key pointers:  
+import requests
+import json
+import git
+import spacy
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sentence_transformers import SentenceTransformer
 
-### **1. Academic Performance & Technical Skills**  
-- Strong GPA (not the only factor, but a good indicator of consistency)  
-- Deep understanding of core subjects relevant to the role  
-- Participation in technical competitions (coding contests, hackathons, robotics, etc.)  
-- Personal projects, GitHub contributions, or open-source involvement  
-- Research papers or publications (if applicable)  
+# Load NLP models
+nlp = spacy.load("en_core_web_sm")
+embedder = SentenceTransformer("all-MiniLM-L6-v2")  # BERT-based embedding
 
-### **2. Problem-Solving & Critical Thinking**  
-- Ability to analyze and break down complex problems  
-- Experience with real-world problem-solving through projects or case studies  
-- Logical reasoning demonstrated in interviews or assessments  
+# Jira API Details
+JIRA_URL = "https://your-jira-instance.atlassian.net/rest/api/2"
+HEADERS = {"Authorization": "Bearer YOUR_TOKEN", "Content-Type": "application/json"}
 
-### **3. Industry Exposure & Practical Experience**  
-- Internship experience, even if short-term or freelance work  
-- Participation in industry-relevant bootcamps, workshops, or certifications  
-- Practical experience through part-time jobs or consulting work  
+# Function to fetch Jira Defects
+def get_jira_defects():
+    query = f"{JIRA_URL}/search?jql=project=DEFECTS AND status='Open'"
+    response = requests.get(query, headers=HEADERS)
+    return response.json()["issues"]
 
-### **4. Initiative & Leadership Qualities**  
-- Leadership roles in student organizations, clubs, or college events  
-- Organizing technical or non-technical fests, coding meetups, or study groups  
-- Mentorship roles (teaching juniors, online content creation, etc.)  
+# Function to fetch Jira Stories
+def get_jira_stories():
+    query = f"{JIRA_URL}/search?jql=project=STORY AND status='Done'"
+    response = requests.get(query, headers=HEADERS)
+    return response.json()["issues"]
 
-### **5. Communication & Teamwork**  
-- Strong written and verbal communication skills  
-- Effective collaboration in team projects or group assignments  
-- Public speaking, debating, or presenting in conferences/competitions  
+# Function to calculate time difference (feature)
+def calculate_time_diff(defect_time, story_time):
+    d_time = datetime.strptime(defect_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+    s_time = datetime.strptime(story_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+    return abs((d_time - s_time).total_seconds())
 
-### **6. Additional Differentiators**  
-- **Entrepreneurial Mindset:** Started a small business, tech startup, or freelancing venture  
-- **Cross-Disciplinary Learning:** Explored fields beyond their major (e.g., an engineer learning finance, marketing, or psychology)  
-- **Community Engagement:** Volunteering, NGOs, or social initiatives in technology  
-- **Patents or Unique Innovations:** If they have worked on patents, novel projects, or significant innovations  
-- **Active Online Presence:** Writing tech blogs, YouTube tutorials, or engaging in discussions on platforms like LinkedIn, Reddit, or Stack Overflow  
+# Function to compute NLP text similarity
+def calculate_nlp_similarity(text1, text2):
+    doc1, doc2 = embedder.encode([text1, text2])
+    return np.dot(doc1, doc2) / (np.linalg.norm(doc1) * np.linalg.norm(doc2))
+
+# Function to analyze Git changes and overlap
+def analyze_git_changes(defect_files, story_files):
+    return len(set(defect_files) & set(story_files))  # Count of overlapping modified files
+
+# Load historical data for training
+def load_training_data():
+    return pd.read_csv("historical_defect_story_mappings.csv")  # Must have labels
+
+# Train ML model
+def train_model():
+    df = load_training_data()
+    X = df[["time_diff", "nlp_similarity", "code_overlap"]]
+    y = df["is_related"]  # 1 if related, 0 if not
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    y_pred = model.predict(X_test)
+    print(f"Model Accuracy: {accuracy_score(y_test, y_pred)}")
+    
+    return model
+
+# Function to predict related Jira Stories for a defect
+def predict_related_stories(defect, stories, model):
+    defect_id = defect["key"]
+    defect_desc = defect["fields"]["description"]
+    defect_time = defect["fields"]["created"]
+    defect_files = defect.get("fields", {}).get("affectedFiles", [])
+
+    probable_causes = []
+
+    for story in stories:
+        story_id = story["key"]
+        story_desc = story["fields"]["description"]
+        story_time = story["fields"]["created"]
+        story_files = story.get("fields", {}).get("modifiedFiles", [])
+
+        features = np.array([
+            calculate_time_diff(defect_time, story_time),
+            calculate_nlp_similarity(defect_desc, story_desc),
+            analyze_git_changes(defect_files, story_files)
+        ]).reshape(1, -1)
+
+        prediction = model.predict(features)[0]
+        probability = model.predict_proba(features)[0][1]  # Probability of being related
+        
+        if prediction == 1:
+            probable_causes.append({"story_id": story_id, "probability": probability})
+
+    return {"defect_id": defect_id, "probable_causes": sorted(probable_causes, key=lambda x: -x["probability"])}
+
+# Run the prediction process
+if __name__ == "__main__":
+    ml_model = train_model()
+    defects = get_jira_defects()
+    stories = get_jira_stories()
+
+    results = [predict_related_stories(defect, stories, ml_model) for defect in defects]
+    print(json.dumps(results, indent=4))
