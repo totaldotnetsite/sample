@@ -1,27 +1,28 @@
+
 import numpy as np
 import pandas as pd
 import spacy
+import json
 from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from sentence_transformers import SentenceTransformer
+from collections import Counter
 
-# Load NLP models
+# Load NLP model
 nlp = spacy.load("en_core_web_sm")
-embedder = SentenceTransformer("all-MiniLM-L6-v2")  # BERT-based embedding
 
 # Sample Jira Defects (Simulated)
 defects = [
     {
         "key": "DEF-001",
-        "description": "Application crashes when submitting the payment form",
+        "description": "Payment submission fails intermittently due to timeout.",
         "created": "2025-03-15T10:00:00.000Z",
         "affectedFiles": ["payment.py", "checkout.js"]
     },
     {
         "key": "DEF-002",
-        "description": "User session timeout issue after login",
+        "description": "Session expires immediately after login for some users.",
         "created": "2025-03-17T12:00:00.000Z",
         "affectedFiles": ["auth.py", "session_handler.js"]
     }
@@ -31,34 +32,46 @@ defects = [
 stories = [
     {
         "key": "STORY-101",
-        "description": "Implemented new payment API integration",
-        "created": "2025-03-14T09:00:00.000Z",
+        "description": "Implemented new payment API with timeout handling.",
+        "created": "2025-03-12T09:00:00.000Z",
         "modifiedFiles": ["payment.py", "billing.js"]
     },
     {
         "key": "STORY-102",
-        "description": "Fixed session timeout issue for active users",
-        "created": "2025-03-16T15:30:00.000Z",
+        "description": "Fixed session management to prevent premature logout.",
+        "created": "2025-03-14T15:30:00.000Z",
         "modifiedFiles": ["auth.py", "session_handler.js"]
     },
     {
         "key": "STORY-103",
-        "description": "Refactored cart checkout process",
+        "description": "Refactored cart checkout process for smoother transactions.",
         "created": "2025-03-10T14:00:00.000Z",
         "modifiedFiles": ["checkout.js", "cart_handler.js"]
     }
 ]
 
-# Function to calculate time difference (feature)
+# Function to extract keywords from text
+def extract_keywords(text):
+    doc = nlp(text.lower())  
+    return [token.lemma_ for token in doc if token.is_alpha and not token.is_stop]  # Lemmatization + Stopword removal
+
+# Function to calculate keyword overlap between defect and story
+def keyword_overlap(defect_text, story_text):
+    defect_keywords = extract_keywords(defect_text)
+    story_keywords = extract_keywords(story_text)
+    return len(set(defect_keywords) & set(story_keywords))  # Count of common keywords
+
+# Function to calculate time difference (defect should be after story completion)
 def calculate_time_diff(defect_time, story_time):
     d_time = datetime.strptime(defect_time, "%Y-%m-%dT%H:%M:%S.%fZ")
     s_time = datetime.strptime(story_time, "%Y-%m-%dT%H:%M:%S.%fZ")
-    return abs((d_time - s_time).total_seconds())
-
-# Function to compute NLP text similarity
-def calculate_nlp_similarity(text1, text2):
-    doc1, doc2 = embedder.encode([text1, text2])
-    return np.dot(doc1, doc2) / (np.linalg.norm(doc1) * np.linalg.norm(doc2))
+    
+    diff = (d_time - s_time).total_seconds()
+    
+    if diff <= 0:  
+        return None  # Ignore stories completed after or at the same time as the defect
+    
+    return diff
 
 # Function to analyze Git changes and overlap
 def analyze_git_changes(defect_files, story_files):
@@ -66,10 +79,10 @@ def analyze_git_changes(defect_files, story_files):
 
 # Sample Training Data (Simulated Historical Mappings)
 training_data = [
-    {"time_diff": 86400, "nlp_similarity": 0.85, "code_overlap": 2, "is_related": 1},  # Related
-    {"time_diff": 259200, "nlp_similarity": 0.65, "code_overlap": 1, "is_related": 0},  # Not Related
-    {"time_diff": 43200, "nlp_similarity": 0.92, "code_overlap": 2, "is_related": 1},  # Related
-    {"time_diff": 604800, "nlp_similarity": 0.50, "code_overlap": 0, "is_related": 0},  # Not Related
+    {"time_diff": 86400, "keyword_overlap": 3, "code_overlap": 2, "is_related": 1},  # Related
+    {"time_diff": 259200, "keyword_overlap": 1, "code_overlap": 1, "is_related": 0},  # Not Related
+    {"time_diff": 43200, "keyword_overlap": 4, "code_overlap": 2, "is_related": 1},  # Related
+    {"time_diff": 604800, "keyword_overlap": 0, "code_overlap": 0, "is_related": 0},  # Not Related
 ]
 
 # Convert training data to Pandas DataFrame
@@ -77,7 +90,7 @@ df = pd.DataFrame(training_data)
 
 # Train ML model
 def train_model():
-    X = df[["time_diff", "nlp_similarity", "code_overlap"]]
+    X = df[["time_diff", "keyword_overlap", "code_overlap"]]
     y = df["is_related"]
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -104,9 +117,14 @@ def predict_related_stories(defect, stories, model):
         story_time = story["created"]
         story_files = story["modifiedFiles"]
 
+        # Check datetime logic (story must be completed before defect)
+        time_diff = calculate_time_diff(defect_time, story_time)
+        if time_diff is None:
+            continue  # Skip invalid time matches
+
         features = np.array([
-            calculate_time_diff(defect_time, story_time),
-            calculate_nlp_similarity(defect_desc, story_desc),
+            time_diff,
+            keyword_overlap(defect_desc, story_desc),
             analyze_git_changes(defect_files, story_files)
         ]).reshape(1, -1)
 
