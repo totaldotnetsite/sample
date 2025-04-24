@@ -1,248 +1,88 @@
-To establish this linkage, you'll need a robust mapping strategy. Here are some key steps:
-
-Extract Key Identifiers
-
-From Jira Defects: Capture timestamps, affected components, impacted functionality, and defect descriptions.
-From Change Requests: Extract change details, modified components, deployment timestamps, and associated test results.
-Compare Timestamps and Deployment Logs
-
-Identify which CRs were deployed before the defect occurrence.
-Use CI/CD logs, deployment timestamps, and version numbers to filter relevant changes.
-Analyze Code and Component Changes
-
-Compare modified components in CRs with impacted components in the defect.
-Use Git commits, configuration changes, or release notes to track modifications.
-Leverage NLP for Similarity Matching
-
-Use AI (like your Mistral model) to compare defect descriptions with CR descriptions, commit messages, and test results.
-Identify common keywords, impacted functionality, and relevant dependencies.
-Weighting and Scoring Mechanism
-
-Assign confidence scores based on matching factors (e.g., timestamp alignment, component similarity, past defect associations).
-Prioritize CRs with the highest correlation.
-Would you like help structuring a JSON schema to store this mapping?
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
 
+# Load 2024 PlanView data
+planview_2024 = pd.read_excel("path_to_planview_2024.xlsx")
+planview_2024['year'] = 2024
 
-To establish a strong and reliable link between Jira production defects and the change requests (Jira Stories, ServiceNow CRs, or both) that caused them, you can leverage multiple methods beyond just timestamps and component changes. Here’s a more comprehensive breakdown:
+# Load 2025 PlanView data
+planview_2025 = pd.read_excel("path_to_planview_2025.xlsx")
+planview_2025['year'] = 2025
 
-1. Deployment and Release Tracking
-A. CI/CD Pipeline Logs
-Track deployments and releases to production and cross-reference them with defect occurrence times.
-Use CI/CD tools (e.g., Jenkins, GitHub Actions, Azure DevOps) to fetch deployment metadata, including change sets, version numbers, and commit hashes.
-Compare the timestamp of the last successful deployment before the defect occurrence.
-B. Version Control (Git) Analysis
-Map defect-related code or configurations to specific commits using Git logs (git log --grep="<defect_keyword>").
-Link commits to Jira Stories or ServiceNow CRs based on branch naming conventions, commit messages, or PR descriptions.
-Use Git blame (git blame <file>) to find recent code changes that could have introduced the defect.
-C. Feature Flags and Canary Releases
-If feature flags were used, check if the defect appeared after a specific feature flag was enabled.
-Identify which CR introduced the flag or altered its configuration.
-2. Code and Component Change Analysis
-A. Code Ownership and Modified Files
-Identify developers or teams responsible for defect-related files.
-Trace recent changes in those files back to specific Jira Stories or CRs.
-B. Static Code Analysis
-Use tools like SonarQube or Coverity to detect potential defect-causing code changes.
-Compare detected issues with recent code modifications linked to CRs.
-C. Dependency Analysis
-Analyze if the defect was caused by an upstream or downstream dependency update.
-Check dependency management tools (Maven, npm, Gradle) for recent version changes introduced by CRs.
-3. Test and Validation Data
-A. Regression Test Failures
-If automated tests failed after a deployment but were ignored, correlate test results with the defect.
-Identify which CRs were part of the failing test run.
-B. UAT or Staging Defects
-Check if similar issues were detected in staging or UAT environments.
-If defects were logged but not fixed before production release, track their associated CRs.
-C. Log and Monitoring Correlation
-Use log analysis tools (Splunk, ELK, Datadog) to correlate error logs with CR deployment timestamps.
-Identify error messages that started appearing after a specific change was deployed.
-4. AI and NLP-Based Analysis
-A. Text Similarity Matching
-Compare Jira defect descriptions with CR descriptions using NLP models.
-Use cosine similarity, TF-IDF, or embeddings to find potential matches.
-B. Root Cause Analysis Automation
-Train an AI model (e.g., using Mistral) to identify defect patterns based on historical data.
-Use past defect-CR mappings to predict likely causes for new defects.
-C. User Feedback and Ticket Trends
-Analyze user-reported issues for recurring patterns.
-If multiple users report similar issues after a CR deployment, it may indicate a link.
-5. Historical Patterns and Recurrence Detection
-A. Similar Past Defects
-Check if similar defects have occurred before and what CRs were responsible.
-If a past defect had the same symptoms, investigate if a similar CR was deployed recently.
-B. Change Failure Rate (CFR)
-Track which CRs or teams have historically introduced the most defects.
-Use this data to prioritize certain CRs as likely defect sources.
-C. Rollback and Hotfix Analysis
-If a rollback was needed after the defect occurred, analyze which CR was reversed.
-If a hotfix resolved the defect, check which components were modified and trace them back to the original CR.
+# Combine both years
+planview_df = pd.concat([planview_2024, planview_2025], ignore_index=True)
+
+# Create proper 'month' field from year + work_month (assumes work_month = '01', '02' etc)
+planview_df['month'] = pd.to_datetime(planview_df['year'].astype(str) + '-' + planview_df['work_month'].astype(str).str.zfill(2))
+
+# Rename for consistency
+planview_df = planview_df.rename(columns={'TotalHours': 'hours', 'project_id': 'project_id'})
 
 
-  
+# === Load Data ===
 
-- **Timestamps and Deployment Logs** (from CI/CD)  
-- **Git Analysis** (commit messages, blame history)  
-- **NLP Similarity Matching** (comparing defect descriptions with CR descriptions)  
-- **Log and Test Failures Correlation**  
+# Load Jira JSON
+jira_df = pd.read_json("path_to_jira_data.json")
 
-You'll need access to Jira, ServiceNow, CI/CD logs, Git, and a logging system (Splunk, ELK, Datadog) to make this fully operational.  
+# Convert date fields
+jira_df['open_date'] = pd.to_datetime(jira_df['open_date'])
+jira_df['close_date'] = pd.to_datetime(jira_df['close_date'])
 
----
+# Load PlanView Excel
+planview_df = pd.read_excel("path_to_planview_data.xlsx")
+planview_df['month'] = pd.to_datetime('2025-' + planview_df['work_month'].astype(str).str.zfill(2))
+planview_df = planview_df.rename(columns={'project_id': 'project_id', 'TotalHours': 'hours'})
 
-### **Python Implementation:**
-```python
-import requests
-import json
-import re
-import git
-import spacy
-from datetime import datetime, timedelta
-from difflib import SequenceMatcher
+# === Assign Weights ===
 
-# Load NLP Model
-nlp = spacy.load("en_core_web_sm")
+# Define mappings (customize as needed)
+severity_weights = {'Critical': 3, 'High': 2, 'Medium': 1.5, 'Low': 1}
+priority_weights = {'P1': 3, 'P2': 2, 'P3': 1}
 
-# Jira & ServiceNow API Credentials (Replace with actual values)
-JIRA_URL = "https://your-jira-instance.atlassian.net/rest/api/2"
-SERVICENOW_URL = "https://your-servicenow-instance/api"
-HEADERS = {"Authorization": "Bearer YOUR_TOKEN", "Content-Type": "application/json"}
+# Apply weights
+jira_df['severity_weight'] = jira_df['severity'].map(severity_weights).fillna(1)
+jira_df['priority_weight'] = jira_df['priority'].map(priority_weights).fillna(1)
+jira_df['total_weight'] = jira_df['severity_weight'] * jira_df['priority_weight']
 
-# Function to fetch Jira defects
-def get_jira_defects():
-    query = f"{JIRA_URL}/search?jql=project=DEFECTS AND status='Open'"
-    response = requests.get(query, headers=HEADERS)
-    return response.json()["issues"]
+# === Expand Jira Defects by Active Months ===
 
-# Function to fetch Jira Stories & ServiceNow CRs
-def get_change_requests():
-    jira_query = f"{JIRA_URL}/search?jql=project=STORY"
-    servicenow_query = f"{SERVICENOW_URL}/now/table/change_request"
+def expand_defect_months(row):
+    active_months = pd.date_range(start=row['open_date'], end=row['close_date'], freq='MS')
+    return pd.DataFrame({
+        'issue_id': row['issue_id'],
+        'project_id': row['project_id'],
+        'month': active_months,
+        'weight': row['total_weight']
+    })
 
-    jira_response = requests.get(jira_query, headers=HEADERS).json()["issues"]
-    servicenow_response = requests.get(servicenow_query, headers=HEADERS).json()["result"]
+expanded_defects = pd.concat([expand_defect_months(row) for _, row in jira_df.iterrows()], ignore_index=True)
 
-    return jira_response + servicenow_response
+# === Aggregate Weight Per Project-Month ===
 
-# Function to compare timestamps of deployments and defect occurrences
-def match_by_timestamps(defect_timestamp, cr_timestamp):
-    defect_time = datetime.strptime(defect_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
-    cr_time = datetime.strptime(cr_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+weights_per_month = expanded_defects.groupby(['project_id', 'month'])['weight'].sum().reset_index()
+weights_per_month.rename(columns={'weight': 'total_month_weight'}, inplace=True)
 
-    return abs((defect_time - cr_time).total_seconds()) < 86400 # Within 24 hours
+# === Merge Weights with PlanView ===
 
-# Function to analyze recent Git commits and blame history
-def analyze_git_changes(defect_files):
-    repo = git.Repo("/path/to/repo")
-    matching_commits = []
+planview_df = planview_df.merge(weights_per_month, on=['project_id', 'month'], how='left')
+planview_df['total_month_weight'] = planview_df['total_month_weight'].fillna(0)
 
-    for file in defect_files:
-        for commit in repo.iter_commits(paths=file):
-            commit_message = commit.message.lower()
-            if any(word in commit_message for word in ["bug", "fix", "defect"]):
-                matching_commits.append(commit.hexsha)
+# === Allocate Hours per Defect ===
 
-    return matching_commits
+expanded_defects = expanded_defects.merge(planview_df, on=['project_id', 'month'], how='left')
 
-# Function to calculate text similarity using NLP
-def calculate_similarity(text1, text2):
-    doc1, doc2 = nlp(text1), nlp(text2)
-    return doc1.similarity(doc2)
+expanded_defects['allocated_hours'] = np.where(
+    expanded_defects['total_month_weight'] > 0,
+    (expanded_defects['weight'] / expanded_defects['total_month_weight']) * expanded_defects['hours'],
+    0
+)
 
-# Function to fetch logs and correlate error messages with change requests
-def analyze_logs(defect_error_message):
-    logs = [
-        {"timestamp": "2025-03-18T12:30:00Z", "message": "Database timeout error", "cr_id": "CR123"},
-        {"timestamp": "2025-03-18T12:45:00Z", "message": "Null pointer exception in Service API", "cr_id": "CR456"},
-    ]
+# === Final Aggregation ===
 
-    matches = [
-        log["cr_id"]
-        for log in logs
-        if SequenceMatcher(None, defect_error_message, log["message"]).ratio() > 0.7
-    ]
+defect_hours = expanded_defects.groupby('issue_id')['allocated_hours'].sum().reset_index()
+defect_hours.rename(columns={'allocated_hours': 'estimated_defect_fix_hours'}, inplace=True)
 
-    return matches
-
-# Function to find potential root causes of defects
-def find_defect_causes():
-    defects = get_jira_defects()
-    change_requests = get_change_requests()
-    
-    defect_links = []
-
-    for defect in defects:
-        defect_id = defect["key"]
-        defect_desc = defect["fields"]["description"]
-        defect_time = defect["fields"]["created"]
-        defect_files = defect.get("fields", {}).get("affectedFiles", [])
-        defect_error_message = defect.get("fields", {}).get("errorLogs", "")
-
-        probable_causes = []
-
-        for cr in change_requests:
-            cr_id = cr["key"] if "key" in cr else cr["sys_id"]
-            cr_desc = cr["fields"]["description"] if "fields" in cr else cr["short_description"]
-            cr_time = cr["fields"]["created"] if "fields" in cr else cr["sys_created_on"]
-
-            # Check if timestamps are close
-            if match_by_timestamps(defect_time, cr_time):
-                probable_causes.append({"cr_id": cr_id, "reason": "Timestamp match"})
-
-            # Check if descriptions are similar
-            if calculate_similarity(defect_desc, cr_desc) > 0.75:
-                probable_causes.append({"cr_id": cr_id, "reason": "Description similarity"})
-
-            # Check if Git commits match
-            if any(commit in analyze_git_changes(defect_files) for commit in cr.get("git_commits", [])):
-                probable_causes.append({"cr_id": cr_id, "reason": "Git commit match"})
-
-            # Check if logs show related errors
-            if cr_id in analyze_logs(defect_error_message):
-                probable_causes.append({"cr_id": cr_id, "reason": "Error log match"})
-
-        defect_links.append({"defect_id": defect_id, "probable_causes": probable_causes})
-
-    return defect_links
-
-# Run the analysis and print results
-if __name__ == "__main__":
-    results = find_defect_causes()
-    print(json.dumps(results, indent=4))
-```
-
----
-
-### **How This Works:**
-1. **Fetches Jira defects and change requests from Jira & ServiceNow.**  
-2. **Matches defects to CRs based on multiple factors:**
-   - **Timestamps** (Was the CR deployed right before the defect?)  
-   - **Git commits** (Did the CR modify files related to the defect?)  
-   - **Description similarity** (Are the defect and CR descriptions semantically similar?)  
-   - **Error logs** (Did the defect's error messages match known logs from CR deployments?)  
-
----
-
-### **Output Example**
-```json
-[
-    {
-        "defect_id": "DEF-123",
-        "probable_causes": [
-            {"cr_id": "STORY-456", "reason": "Timestamp match"},
-            {"cr_id": "STORY-789", "reason": "Description similarity"},
-            {"cr_id": "CR-101", "reason": "Error log match"}
-        ]
-    }
-]
-```
-
----
-
-### **Next Steps**
-- **Enhance accuracy**: Use ML models to improve ranking of probable causes.  
-- **Expand CI/CD analysis**: Connect with Jenkins/GitHub Actions APIs for deeper insights.  
-- **Automate via webhook**: Trigger analysis automatically when a new defect is logged.  
-
-Would you like help integrating this into your AI engine?
+# Final Output
+print(defect_hours)
