@@ -10,3 +10,21 @@ vs_client.create_index(
     embedding_column="embedding"
 )
 
+# Your query text
+query_text = "Login failure during password recovery"
+query_vector = model.encode([query_text])[0]
+
+# Search top 3 similar items (optionally add filters)
+results = vs_client.similarity_search(
+    endpoint_name="your-vector-endpoint",
+    index_name="work_item_vector_index",
+    query_vector=query_vector,
+    filter="type = 'Defect'",
+    columns=["key", "type", "summary", "priority", "severity"],
+    top_k=3
+)
+
+display(results)
+
+
+
