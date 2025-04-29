@@ -1,88 +1,69 @@
-import pandas as pd
-import numpy as np
+from sentence_transformers import SentenceTransformer
+from pyspark.sql import Row
 from datetime import datetime
+import uuid
 
+# Sample data
+records = [
+    {
+        "source": "Jira",
+        "type": "Story",
+        "key": "STORY-001",
+        "summary": "Allow user to reset password",
+        "description": "As a user, I want a reset password option on the login page.",
+        "severity": "Medium",
+        "priority": "High",
+        "created_date": datetime(2024, 6, 1),
+        "closed_date": datetime(2024, 6, 10)
+    },
+    {
+        "source": "Jira",
+        "type": "Defect",
+        "key": "DEFECT-001",
+        "summary": "Password reset throws error",
+        "description": "Clicking reset password causes a NullPointerException in logs.",
+        "severity": "High",
+        "priority": "High",
+        "created_date": datetime(2024, 6, 11),
+        "closed_date": datetime(2024, 6, 12)
+    },
+    {
+        "source": "ServiceNow",
+        "type": "Change",
+        "key": "CHG-001",
+        "summary": "Database schema update for accounts",
+        "description": "Add new columns for customer preferences",
+        "severity": "Low",
+        "priority": "Medium",
+        "created_date": datetime(2024, 5, 20),
+        "closed_date": datetime(2024, 5, 25)
+    }
+]
 
-# Load 2024 PlanView data
-planview_2024 = pd.read_excel("path_to_planview_2024.xlsx")
-planview_2024['year'] = 2024
+# Load model
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Load 2025 PlanView data
-planview_2025 = pd.read_excel("path_to_planview_2025.xlsx")
-planview_2025['year'] = 2025
+# Prepare Spark Rows with embedding
+data = []
+for record in records:
+    full_text = f"{record['summary']}. {record['description']}. Severity: {record['severity']}. Priority: {record['priority']}"
+    embedding = model.encode([full_text])[0].tolist()
+    row = Row(
+        source=record["source"],
+        type=record["type"],
+        key=record["key"],
+        id=str(uuid.uuid4()),
+        summary=record["summary"],
+        description=record["description"],
+        severity=record["severity"],
+        priority=record["priority"],
+        created_date=record["created_date"],
+        closed_date=record["closed_date"],
+        embedding=embedding
+    )
+    data.append(row)
 
-# Combine both years
-planview_df = pd.concat([planview_2024, planview_2025], ignore_index=True)
+df = spark.createDataFrame(data)
 
-# Create proper 'month' field from year + work_month (assumes work_month = '01', '02' etc)
-planview_df['month'] = pd.to_datetime(planview_df['year'].astype(str) + '-' + planview_df['work_month'].astype(str).str.zfill(2))
-
-# Rename for consistency
-planview_df = planview_df.rename(columns={'TotalHours': 'hours', 'project_id': 'project_id'})
-
-
-# === Load Data ===
-
-# Load Jira JSON
-jira_df = pd.read_json("path_to_jira_data.json")
-
-# Convert date fields
-jira_df['open_date'] = pd.to_datetime(jira_df['open_date'])
-jira_df['close_date'] = pd.to_datetime(jira_df['close_date'])
-
-# Load PlanView Excel
-planview_df = pd.read_excel("path_to_planview_data.xlsx")
-planview_df['month'] = pd.to_datetime('2025-' + planview_df['work_month'].astype(str).str.zfill(2))
-planview_df = planview_df.rename(columns={'project_id': 'project_id', 'TotalHours': 'hours'})
-
-# === Assign Weights ===
-
-# Define mappings (customize as needed)
-severity_weights = {'Critical': 3, 'High': 2, 'Medium': 1.5, 'Low': 1}
-priority_weights = {'P1': 3, 'P2': 2, 'P3': 1}
-
-# Apply weights
-jira_df['severity_weight'] = jira_df['severity'].map(severity_weights).fillna(1)
-jira_df['priority_weight'] = jira_df['priority'].map(priority_weights).fillna(1)
-jira_df['total_weight'] = jira_df['severity_weight'] * jira_df['priority_weight']
-
-# === Expand Jira Defects by Active Months ===
-
-def expand_defect_months(row):
-    active_months = pd.date_range(start=row['open_date'], end=row['close_date'], freq='MS')
-    return pd.DataFrame({
-        'issue_id': row['issue_id'],
-        'project_id': row['project_id'],
-        'month': active_months,
-        'weight': row['total_weight']
-    })
-
-expanded_defects = pd.concat([expand_defect_months(row) for _, row in jira_df.iterrows()], ignore_index=True)
-
-# === Aggregate Weight Per Project-Month ===
-
-weights_per_month = expanded_defects.groupby(['project_id', 'month'])['weight'].sum().reset_index()
-weights_per_month.rename(columns={'weight': 'total_month_weight'}, inplace=True)
-
-# === Merge Weights with PlanView ===
-
-planview_df = planview_df.merge(weights_per_month, on=['project_id', 'month'], how='left')
-planview_df['total_month_weight'] = planview_df['total_month_weight'].fillna(0)
-
-# === Allocate Hours per Defect ===
-
-expanded_defects = expanded_defects.merge(planview_df, on=['project_id', 'month'], how='left')
-
-expanded_defects['allocated_hours'] = np.where(
-    expanded_defects['total_month_weight'] > 0,
-    (expanded_defects['weight'] / expanded_defects['total_month_weight']) * expanded_defects['hours'],
-    0
-)
-
-# === Final Aggregation ===
-
-defect_hours = expanded_defects.groupby('issue_id')['allocated_hours'].sum().reset_index()
-defect_hours.rename(columns={'allocated_hours': 'estimated_defect_fix_hours'}, inplace=True)
-
-# Final Output
-print(defect_hours)
+# Save to Delta table on blob container
+df.write.format("delta").mode("overwrite").save("/mnt/vector_data/vector_db")
