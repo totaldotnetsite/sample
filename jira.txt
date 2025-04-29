@@ -1,30 +1,22 @@
-from databricks.vector_search.client import VectorSearchClient
+import faiss
+import numpy as np
 
-vs_client = VectorSearchClient()
+# Load from Delta
+df = spark.read.table("your_catalog.vector_db").toPandas()
+embeddings = np.vstack(df["embedding"].values)
+index = faiss.IndexFlatL2(embeddings.shape[1])  # Euclidean distance index
+index.add(embeddings)
 
-vs_client.create_index(
-    endpoint_name="your-vector-endpoint",
-    index_name="work_item_vector_index",
-    source_table="your_catalog.vector_db",
-    primary_key="id",
-    embedding_column="embedding"
-)
+# Search with a query
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer('all-MiniLM-L6-v2')
+query = "Error resetting password"
+query_vec = model.encode([query]).astype("float32")
 
-# Your query text
-query_text = "Login failure during password recovery"
-query_vector = model.encode([query_text])[0]
+D, I = index.search(query_vec, k=3)  # top 3 results
 
-# Search top 3 similar items (optionally add filters)
-results = vs_client.similarity_search(
-    endpoint_name="your-vector-endpoint",
-    index_name="work_item_vector_index",
-    query_vector=query_vector,
-    filter="type = 'Defect'",
-    columns=["key", "type", "summary", "priority", "severity"],
-    top_k=3
-)
-
-display(results)
-
+# Show matching rows
+results = df.iloc[I[0]]
+print(results[["key", "summary", "type"]])
 
 
