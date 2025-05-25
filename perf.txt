@@ -1,143 +1,86 @@
-
-import numpy as np
+# Required libraries
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 import pandas as pd
-import spacy
-import json
-from datetime import datetime
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from collections import Counter
+import numpy as np
+import requests
+from typing import List
 
-# Load NLP model
-nlp = spacy.load("en_core_web_sm")
+# Step 1: Load embedding model
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# Sample Jira Defects (Simulated)
-defects = [
-    {
-        "key": "DEF-001",
-        "description": "Payment submission fails intermittently due to timeout.",
-        "created": "2025-03-15T10:00:00.000Z",
-        "affectedFiles": ["payment.py", "checkout.js"]
-    },
-    {
-        "key": "DEF-002",
-        "description": "Session expires immediately after login for some users.",
-        "created": "2025-03-17T12:00:00.000Z",
-        "affectedFiles": ["auth.py", "session_handler.js"]
+# Step 2: Load data (assume stories_df and defects_df are preloaded)
+# stories_df: story_id, title, description, acceptance_criteria, comments, closed_date
+# defects_df: defect_id, title, description, comments, created_date
+
+# Step 3: Combine text for embedding
+def combine_story_text(row):
+    return f"ID: {row['story_id']}\nTitle: {row['title']}\nDescription: {row['description']}\nAcceptance Criteria: {row['acceptance_criteria']}\nComments: {row['comments']}"
+
+def combine_defect_text(row):
+    return f"Defect ID: {row['defect_id']}\nTitle: {row['title']}\nDescription: {row['description']}\nComments: {row['comments']}"
+
+stories_df['combined_text'] = stories_df.apply(combine_story_text, axis=1)
+defects_df['combined_text'] = defects_df.apply(combine_defect_text, axis=1)
+
+# Step 4: Create story embeddings
+story_embeddings = embedding_model.encode(stories_df['combined_text'].tolist(), convert_to_tensor=True)
+
+# Step 5: Define function to query LLaMA 4 Maverick endpoint
+def query_llama4(prompt: str, endpoint_url: str, api_token: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json"
     }
-]
+    data = {"inputs": prompt}
+    response = requests.post(endpoint_url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()["predictions"][0]["text"]
 
-# Sample Jira Stories (Simulated)
-stories = [
-    {
-        "key": "STORY-101",
-        "description": "Implemented new payment API with timeout handling.",
-        "created": "2025-03-12T09:00:00.000Z",
-        "modifiedFiles": ["payment.py", "billing.js"]
-    },
-    {
-        "key": "STORY-102",
-        "description": "Fixed session management to prevent premature logout.",
-        "created": "2025-03-14T15:30:00.000Z",
-        "modifiedFiles": ["auth.py", "session_handler.js"]
-    },
-    {
-        "key": "STORY-103",
-        "description": "Refactored cart checkout process for smoother transactions.",
-        "created": "2025-03-10T14:00:00.000Z",
-        "modifiedFiles": ["checkout.js", "cart_handler.js"]
-    }
-]
+# Step 6: Process each defect
+defect_links = []
+ENDPOINT_URL = "https://<your-databricks-workspace>/serving-endpoints/<your-endpoint>/invocations"
+API_TOKEN = "<YOUR_DATABRICKS_TOKEN>"
 
-# Function to extract keywords from text
-def extract_keywords(text):
-    doc = nlp(text.lower())  
-    return [token.lemma_ for token in doc if token.is_alpha and not token.is_stop]  # Lemmatization + Stopword removal
+for _, defect in defects_df.iterrows():
+    defect_created = defect['created_date']
+    filtered_stories = stories_df[stories_df['closed_date'] <= defect_created]
+    if filtered_stories.empty:
+        continue
 
-# Function to calculate keyword overlap between defect and story
-def keyword_overlap(defect_text, story_text):
-    defect_keywords = extract_keywords(defect_text)
-    story_keywords = extract_keywords(story_text)
-    return len(set(defect_keywords) & set(story_keywords))  # Count of common keywords
+    filtered_embeddings = embedding_model.encode(filtered_stories['combined_text'].tolist(), convert_to_tensor=True)
+    defect_embedding = embedding_model.encode(defect['combined_text'], convert_to_tensor=True)
 
-# Function to calculate time difference (defect should be after story completion)
-def calculate_time_diff(defect_time, story_time):
-    d_time = datetime.strptime(defect_time, "%Y-%m-%dT%H:%M:%S.%fZ")
-    s_time = datetime.strptime(story_time, "%Y-%m-%dT%H:%M:%S.%fZ")
-    
-    diff = (d_time - s_time).total_seconds()
-    
-    if diff <= 0:  
-        return None  # Ignore stories completed after or at the same time as the defect
-    
-    return diff
+    sims = cosine_similarity([defect_embedding.cpu().numpy()], filtered_embeddings.cpu().numpy())[0]
+    top_indices = np.argsort(sims)[::-1][:5]  # Top 5 most similar stories
+    top_stories = filtered_stories.iloc[top_indices]
 
-# Function to analyze Git changes and overlap
-def analyze_git_changes(defect_files, story_files):
-    return len(set(defect_files) & set(story_files))  # Count of overlapping modified files
+    # Construct prompt
+    candidate_section = ""
+    for i, row in top_stories.iterrows():
+        candidate_section += f"{row['combined_text']}\n\n"
 
-# Sample Training Data (Simulated Historical Mappings)
-training_data = [
-    {"time_diff": 86400, "keyword_overlap": 3, "code_overlap": 2, "is_related": 1},  # Related
-    {"time_diff": 259200, "keyword_overlap": 1, "code_overlap": 1, "is_related": 0},  # Not Related
-    {"time_diff": 43200, "keyword_overlap": 4, "code_overlap": 2, "is_related": 1},  # Related
-    {"time_diff": 604800, "keyword_overlap": 0, "code_overlap": 0, "is_related": 0},  # Not Related
-]
+    prompt = f"""
+You are a software quality expert.
 
-# Convert training data to Pandas DataFrame
-df = pd.DataFrame(training_data)
+A defect occurred with the following details:
+{defect['combined_text']}
 
-# Train ML model
-def train_model():
-    X = df[["time_diff", "keyword_overlap", "code_overlap"]]
-    y = df["is_related"]
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    
-    y_pred = model.predict(X_test)
-    print(f"Model Accuracy: {accuracy_score(y_test, y_pred)}")
-    
-    return model
+The following are potential causing stories:
+{candidate_section}
 
-# Function to predict related Jira Stories for a defect
-def predict_related_stories(defect, stories, model):
-    defect_id = defect["key"]
-    defect_desc = defect["description"]
-    defect_time = defect["created"]
-    defect_files = defect["affectedFiles"]
+Which of these stories most likely introduced the defect? List the story IDs and explain your reasoning.
+"""
 
-    probable_causes = []
+    reasoning = query_llama4(prompt, ENDPOINT_URL, API_TOKEN)
+    linked_story_ids = top_stories['story_id'].tolist()
 
-    for story in stories:
-        story_id = story["key"]
-        story_desc = story["description"]
-        story_time = story["created"]
-        story_files = story["modifiedFiles"]
+    defect_links.append({
+        "defect_id": defect['defect_id'],
+        "linked_story_ids": linked_story_ids,
+        "reasoning": reasoning.strip()
+    })
 
-        # Check datetime logic (story must be completed before defect)
-        time_diff = calculate_time_diff(defect_time, story_time)
-        if time_diff is None:
-            continue  # Skip invalid time matches
-
-        features = np.array([
-            time_diff,
-            keyword_overlap(defect_desc, story_desc),
-            analyze_git_changes(defect_files, story_files)
-        ]).reshape(1, -1)
-
-        prediction = model.predict(features)[0]
-        probability = model.predict_proba(features)[0][1]  # Probability of being related
-        
-        if prediction == 1:
-            probable_causes.append({"story_id": story_id, "probability": round(probability, 2)})
-
-    return {"defect_id": defect_id, "probable_causes": sorted(probable_causes, key=lambda x: -x["probability"])}
-
-# Run the prediction process
-if __name__ == "__main__":
-    ml_model = train_model()
-    results = [predict_related_stories(defect, stories, ml_model) for defect in defects]
-    print(json.dumps(results, indent=4))
+# Step 7: Output result
+linked_df = pd.DataFrame(defect_links)
+linked_df.to_json("linked_defects_stories.json", orient="records", indent=2)
